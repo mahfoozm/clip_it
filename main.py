@@ -4,13 +4,20 @@ import requests
 import subprocess
 import time
 import os
+import shutil
 
 app = Flask(__name__)
 
 HA_URL = "https://clipittang.duckdns.org:8123"
 HA_TOKEN = os.getenv("HA_TOKEN")
 
-SEGMENTS_DIR = "/home/mohammadmahfooz/clips/"
+# Use a RAM-backed directory for segments
+EPHEMERAL_SEGMENTS_DIR = "/dev/shm/clip_segments/"
+os.makedirs(EPHEMERAL_SEGMENTS_DIR, exist_ok=True)
+
+# Final disk directory for merged clips (one write per trigger)
+FINAL_CLIPS_DIR = "/home/mohammadmahfooz/clips/"
+os.makedirs(FINAL_CLIPS_DIR, exist_ok=True)
 
 GOOGLE_PHOTOS_UPLOAD_URL = "https://photoslibrary.googleapis.com/v1/uploads"
 GOOGLE_PHOTOS_CREATE_URL = (
@@ -58,53 +65,55 @@ def ensure_valid_token():
 # Fetch a fresh token when the app starts
 refresh_google_photos_token()
 
+# ffmpeg command to record 5-second segments in RAM, overwriting after 12 (~1 minute)
 ffmpeg_command = [
     "ffmpeg",
     "-thread_queue_size",
-    "512",  # Increase queue for video input
+    "512",
     "-f",
     "v4l2",
     "-input_format",
-    "mjpeg",  # Request MJPEG from the webcam
+    "mjpeg",
     "-video_size",
-    "1920x1080",  # 1080p resolution
+    "1920x1080",
     "-framerate",
-    "30",  # 30 fps
+    "30",
     "-i",
-    "/dev/video0",  # Video input device
+    "/dev/video0",
     "-thread_queue_size",
-    "512",  # Increase queue for audio input
+    "512",
     "-f",
     "pulse",
     "-i",
-    "alsa_input.usb-EMEET_HD_Webcam_eMeet_C960_A241108000315080-02.analog-stereo",  # Audio input via PulseAudio
+    "alsa_input.usb-EMEET_HD_Webcam_eMeet_C960_A241108000315080-02.analog-stereo",
     "-map",
-    "0:v",  # Map video stream
+    "0:v",
     "-map",
-    "1:a",  # Map audio stream
+    "1:a",
     "-filter:a",
-    "volume=7.5",  # Boost audio volume
+    "volume=7.5",
     "-c:v",
-    "libx264",  # Use software encoder
+    "libx264",
     "-preset",
-    "ultrafast",  # Low-latency preset
+    "ultrafast",
     "-b:v",
-    "4M",  # Set video bitrate (4 Mbps; adjust as needed)
+    "4M",
     "-c:a",
-    "aac",  # Encode audio using AAC
+    "aac",
     "-b:a",
-    "128k",  # Set audio bitrate
+    "128k",
     "-f",
-    "segment",  # Segment muxer
+    "segment",
     "-segment_time",
-    "5",  # 5-second segments
+    "5",
     "-segment_wrap",
-    "12",  # Cycle through 12 segments (~1 minute total)
-    os.path.join(SEGMENTS_DIR, "segment_%03d.mp4"),
+    "12",
+    "-reset_timestamps",
+    "1",
+    os.path.join(EPHEMERAL_SEGMENTS_DIR, "segment_%03d.mp4"),
 ]
 
-
-# Start ffmpeg as a background process
+# Start ffmpeg in the background
 ffmpeg_process = subprocess.Popen(ffmpeg_command)
 
 
@@ -127,39 +136,53 @@ def turn_off_switch():
     return response.ok
 
 
-def merge_segments():
+def merge_segments_in_ram():
     """
-    Merges the last 12 finalized segments (each 5 seconds) into a single clip.
-    Only segments not modified within the last 5 seconds are included.
+    Merges up to 12 finalized segments from /dev/shm.
+    A segment is "finalized" if its modification time is older than 'threshold' seconds
+    (i.e., it has presumably stopped being written to by ffmpeg).
+
+    If no segments are finalized, raises an exception.
+    Otherwise, merges however many (up to 12) are available.
+
+    Returns the path to the merged file in /dev/shm.
     """
-    threshold = 5  # seconds
+    threshold = 1
     now = time.time()
 
-    segments = sorted(os.listdir(SEGMENTS_DIR))
+    segments = sorted(os.listdir(EPHEMERAL_SEGMENTS_DIR))
     finalized_segments = []
+
+    # Filter only finalized segments (older than threshold)
     for seg in segments:
         if seg.startswith("segment_") and seg.endswith(".mp4"):
-            seg_path = os.path.join(SEGMENTS_DIR, seg)
+            seg_path = os.path.join(EPHEMERAL_SEGMENTS_DIR, seg)
             if now - os.path.getmtime(seg_path) > threshold:
                 finalized_segments.append(seg)
 
+    # If no segments are finalized, raise an exception
     if not finalized_segments:
-        raise Exception("No finalized segments available for merging.")
+        raise Exception("No finalized segments available.")
 
-    # For a 1-minute clip, use the last 12 segments (5 sec each)
+    # Take up to the last 12
     segments_to_merge = finalized_segments[-12:]
 
-    list_file = os.path.join(SEGMENTS_DIR, "segments_list.txt")
+    # Build a concat list file
+    list_file = os.path.join(EPHEMERAL_SEGMENTS_DIR, "segments_list.txt")
     with open(list_file, "w") as f:
         for seg in segments_to_merge:
-            seg_path = os.path.join(SEGMENTS_DIR, seg)
+            seg_path = os.path.join(EPHEMERAL_SEGMENTS_DIR, seg)
             f.write(f"file '{seg_path}'\n")
 
-    # Generate a unique output filename using a timestamp
-    output_video = os.path.join(SEGMENTS_DIR, f"clip_{int(time.time())}.mp4")
+    # Generate a merged filename in RAM
+    merged_in_ram = os.path.join(
+        EPHEMERAL_SEGMENTS_DIR, f"merged_{int(time.time())}.mp4"
+    )
+
+    # Merge the segments
     merge_command = [
         "ffmpeg",
-        "-y",  # Overwrite without prompting.
+        "-y",  # Overwrite without prompting
         "-f",
         "concat",
         "-safe",
@@ -168,17 +191,18 @@ def merge_segments():
         list_file,
         "-c",
         "copy",
-        output_video,
+        merged_in_ram,
     ]
     subprocess.run(merge_command, check=True)
-    return output_video
+
+    return merged_in_ram
 
 
 def upload_to_google_photos(video_file):
     """
-    Uploads the given video file to Google Photos.
+    Upload the given video file to Google Photos.
     """
-    ensure_valid_token()  # Refresh token if expired
+    ensure_valid_token()
 
     with open(video_file, "rb") as f:
         video_bytes = f.read()
@@ -219,12 +243,27 @@ def trigger_action():
     try:
         # Optionally, turn off the switch in Home Assistant
         turn_off_switch()
-        merged_video = merge_segments()
-        upload_result = upload_to_google_photos(merged_video)
+
+        # Merge from RAM
+        merged_in_ram = merge_segments_in_ram()
+
+        # Copy the merged file from RAM to SD card (single write)
+        final_filename = f"clip_{int(time.time())}.mp4"
+        final_path = os.path.join(FINAL_CLIPS_DIR, final_filename)
+        shutil.copy2(merged_in_ram, final_path)
+
+        # Upload from the final_path on disk or from merged_in_ram in RAM (both have identical content)
+        # We'll just upload from merged_in_ram (still in memory)
+        upload_result = upload_to_google_photos(merged_in_ram)
+
+        # Remove the merged file from RAM to free memory
+        os.remove(merged_in_ram)
+
         return jsonify(
             {
                 "status": "success",
-                "uploaded_clip": os.path.basename(merged_video),
+                "uploaded_clip": os.path.basename(final_path),
+                "saved_local_path": final_path,
                 "upload_result": upload_result,
             }
         )
