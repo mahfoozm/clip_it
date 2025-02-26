@@ -1,0 +1,85 @@
+# Loads default set of integrations. Do not remove.
+default_config:
+
+# Load frontend themes from the themes folder
+frontend:
+  themes: !include_dir_merge_named themes
+
+script: !include scripts.yaml
+scene: !include scenes.yaml
+
+input_boolean:
+  clip_10s:
+    name: "Save last 10 seconds"
+  clip_30s:
+    name: "Save last 30 seconds"
+  clip_60s:
+    name: "Save last 60 seconds"
+  clip_300s:
+    name: "Save last 300 seconds"
+
+rest_command:
+  clip_it_action:
+    url: "http://localhost:5000/trigger"
+    method: POST
+    content_type: "application/json"
+    payload: '{"duration": {{ duration }}, "entity_id": "{{ entity_id }}"}'
+
+automation:
+  - alias: "Save 10s clip"
+    trigger:
+      platform: state
+      entity_id: input_boolean.clip_10s
+      to: "on"
+    action:
+      - service: rest_command.clip_it_action
+        data:
+          duration: 10
+          entity_id: "input_boolean.clip_10s"
+
+  - alias: "Save 30s clip"
+    trigger:
+      platform: state
+      entity_id: input_boolean.clip_30s
+      to: "on"
+    action:
+      - service: rest_command.clip_it_action
+        data:
+          duration: 30
+          entity_id: "input_boolean.clip_30s"
+
+  - alias: "Save 1 minute clip"
+    trigger:
+      platform: state
+      entity_id: input_boolean.clip_60s
+      to: "on"
+    action:
+      - service: rest_command.clip_it_action
+        data:
+          duration: 60
+          entity_id: "input_boolean.clip_60s"
+
+  - alias: "Save 5 minute clip"
+    trigger:
+      platform: state
+      entity_id: input_boolean.clip_300s
+      to: "on"
+    action:
+      - service: rest_command.clip_it_action
+        data:
+          duration: 300
+          entity_id: "input_boolean.clip_300s"
+      
+http:
+  use_x_forwarded_for: true
+  trusted_proxies:
+    - 172.30.33.0/24
+    - 127.0.0.1
+    - 192.168.2.237
+
+google_assistant:
+  project_id: clipit-00ada2
+  service_account: !include SERVICE_ACCOUNT.JSON
+  report_state: true
+  exposed_domains:
+    - input_boolean
