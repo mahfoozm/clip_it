@@ -89,10 +89,10 @@ ffmpeg_command = [
     "-i", "/dev/video0",
     "-thread_queue_size", "512",
     "-f", "pulse",
-    "-i", "alsa_input.usb-EMEET_HD_Webcam_eMeet_C960_A241108000315080-02.analog-stereo",
+    "-i", "nui_mic_denoised_out.monitor",
     "-map", "0:v",
     "-map", "1:a",
-    "-filter:a", "volume=10.0",
+    "-filter:a", "volume=15.0",
     "-c:v", "libx264",
     "-g", "60",  # Added to set keyframe interval to 2 seconds
     "-preset", "ultrafast",
